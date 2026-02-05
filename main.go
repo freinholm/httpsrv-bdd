@@ -1,20 +1,53 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"net/http"
+	"sync/atomic"
+	"os"
+	"database/sql"
+
+	"github.com/joho/godotenv"
+	"github.com/freinholm/httpsrv-bdd/internal/database"
+
+	_ "github.com/lib/pq"
 )
 
-type apiHandler struct{}
-
-func (apiHandler) ServeHTTP(http.ResponseWriter, *http.Request) {}
+type apiConfig struct {
+	fileserverHits 	atomic.Int32
+	db				*database.Queries
+}
 
 func main() {
 	const port = "8080"
 	const filepathRoot = "."
 
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatal("Error loading .env file")
+	}
+
+  	dbURL := os.Getenv("DB_URL")
+
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		log.Fatalf("error connecting to pgsql: %s", err)
+	}
+
+	dbQueries = database.New(db)
+
+	apiCfg := apiConfig{
+		fileserverHits: atomic.Int32{},
+		db:				dbQueries,
+	}
+
 	mux := http.NewServeMux()
-	mux.Handle("/", http.FileServer(http.Dir(filepathRoot)))
+	mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(filepathRoot)))))
+	mux.HandleFunc("GET /api/healthz", handlerReadiness)
+	mux.HandleFunc("POST /api/validate_chirp", handlerChirpsValidate)
+	mux.HandleFunc("GET /admin/metrics", apiCfg.handlerMetrics)
+	mux.HandleFunc("POST /admin/reset", apiCfg.handlerReset)
 
 	srv := &http.Server{
 		Addr:    ":" + port,
@@ -23,4 +56,17 @@ func main() {
 
 	log.Printf("Serving files from %s on port: %s\n", filepathRoot, port)
 	log.Fatal(srv.ListenAndServe())
+}
+
+func (cfg *apiConfig) handlerMetrics(w http.ResponseWriter, r *http.Request) {
+	w.Header().Add("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(fmt.Sprintf("<html>\n  <body>\n    <h1>Welcome, Chirpy Admin</h1>\n    <p>Chirpy has been visited %d times!</p>\n  </body>\n</html>", cfg.fileserverHits.Load())))
+}
+
+func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cfg.fileserverHits.Add(1)
+		next.ServeHTTP(w, r)
+	})
 }
